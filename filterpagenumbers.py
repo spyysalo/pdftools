@@ -175,7 +175,8 @@ def find_page_number_lines(document, args):
         return []
     elif len(sequences) == 1:
         selected_sequence = sequences[0]
-    elif len(sequences) > 2:
+    else:
+        assert len(sequences) > 1
         logger.warning(f'found {len(sequences)} possible page number sequences')
         selected_sequence = sequences[0]    # TODO pick heuristically
 
@@ -198,7 +199,7 @@ def main(argv):
         lines = find_page_number_lines(document, args)
         logger.debug(f'removing {len(lines)}/{len(document.pages)} from {fn}')
         document.remove_lines(lines)
-        print(document)
+        print(document.to_freki())
 
 
 if __name__ == '__main__':
