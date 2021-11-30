@@ -2,13 +2,13 @@
 
 import sys
 import os
-import re
 import logging
 
 from collections import defaultdict
 from string import punctuation
 from argparse import ArgumentParser
 
+from common import longest_increasing_subsequence
 from loadfreki import load_freki_document
 
 
@@ -27,7 +27,7 @@ def argparser():
     ap.add_argument(
         'freki',
         nargs='+',
-        help='text file(s) extracted from PDF'
+        help='freki file(s) extracted from PDF'
     )
     return ap
 
@@ -49,46 +49,6 @@ class PageNumberCandidate:
 
     def __repr__(self):
         return self.__str__()
-
-
-def longest_increasing_subsequence(seq):
-    # O(n log n) implementation following
-    # https://en.wikipedia.org/wiki/Longest_increasing_subsequence
-    min_idx = [0] * (len(seq)+1)
-    pred = [0] * len(seq)
-    max_len = 0
-    for i in range(0, len(seq)):
-        # Binary search for the largest positive j <= max_len such
-        # that seq[min_idx[j]] < seq[i]
-        lo = 1
-        hi = max_len + 1
-        while lo < hi:
-            mid = lo + int((hi-lo)/2)
-            if seq[min_idx[mid]] < seq[i]:
-                lo = mid + 1
-            else:
-                hi = mid
-
-        # lo is 1 greater than the length of the longest prefix of seq[i]
-        new_len = lo
-
-        # predecessor of seq[i] is the last index of the subsequence
-        # of length new_len-1
-        pred[i] = min_idx[new_len-1]
-        min_idx[new_len] = i
-
-        if new_len > max_len:
-            # found subsequence longer than any found yet
-            max_len = new_len
-
-    # reconstruct
-    lis = [0] * max_len
-    k = min_idx[max_len]
-    for i in reversed(range(0, max_len)):
-        lis[i] = seq[k]
-        k = pred[k]
-
-    return lis
 
 
 def ispunct(string):
