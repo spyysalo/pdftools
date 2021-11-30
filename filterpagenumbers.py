@@ -113,15 +113,16 @@ def parse_page_number_line(string):
 
 def page_number_candidates(document):
     candidates = []
-    for block in document.blocks:
-        for line in block.lines:
-            try:
-                number, shape = parse_page_number_line(line.text)
-            except ValueError:
-                continue    # not a page number line
-            page_index = block.page_index
-            candidate = PageNumberCandidate(page_index, number, shape, line)
-            candidates.append(candidate)
+    for page in document.pages:
+        for block in page.blocks:
+            for line in block.lines:
+                try:
+                    number, shape = parse_page_number_line(line.text)
+                except ValueError:
+                    continue    # not a page number line
+                page_index = block.page_index
+                candidate = PageNumberCandidate(page_index, number, shape, line)
+                candidates.append(candidate)
     return candidates
 
 
@@ -195,7 +196,11 @@ def main(argv):
         logger.setLevel(logging.INFO)
 
     for fn in args.freki:
-        document = load_freki_document(fn, args)
+        try:
+            document = load_freki_document(fn, args)
+        except ValueError as e:
+            logger.error(f'failed to load {fn}: {e}')
+            continue
         lines = find_page_number_lines(document, args)
         logger.debug(f'removing {len(lines)}/{len(document.pages)} from {fn}')
         document.remove_lines(lines)
