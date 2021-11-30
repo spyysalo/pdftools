@@ -8,12 +8,14 @@ from logger import logger
 from collections import Counter
 from argparse import ArgumentParser
 
+from common import pairwise
+
 
 # Regular expressions for parsing Freki format
 # (see https://github.com/xigt/freki/blob/master/doc/Format.md).
 BLOCK_PREAMBLE_RE = re.compile(r'^doc_id=(\S+) page=(\d+) block_id=(\d+-\d+) bbox=(\S+) label=(\S*) (\d+) (\d+)$')
 
-BLOCK_LINE_RE = re.compile(r'line=(\d+) fonts=(.*?) bbox=(\S+?)(?: iscore=(\d+\.\d+))?(\s*):(.*)$')
+BLOCK_LINE_RE = re.compile(r'line=(\d+) fonts=(.+?) bbox=(\S+?)(?: iscore=(\d+\.\d+))?(\s*):(.*)$')
 
 FONT_RE = re.compile(r'(?:([A-Z]{6})\+)?(.+?)-(\d+\.\d+),?')
 
@@ -50,6 +52,29 @@ class BBox:
 
     def height(self):
         return self.ury - self.lly
+
+    def is_above(self, other):
+        return self.lly > other.ury
+
+    def contains(self, other):
+        return (self.llx <= other.llx and
+                self.lly <= other.lly and
+                self.urx >= other.urx and
+                self.ury >= other.ury)
+
+    def expand_to_contain(self, other):
+        self.llx = min(self.llx, other.llx)
+        self.lly = min(self.lly, other.lly)
+        self.urx = max(self.urx, other.urx)
+        self.ury = max(self.ury, other.ury)
+
+    def vertical_distance(self, other):
+        if self.is_above(other):
+            return self.lly - other.ury
+        elif other.is_above(self):
+            return other.lly - self.ury
+        else:
+            raise ValueError(f'neither above: {self} vs {other}')
 
     def to_freki(self):
         return f'{self.llx},{self.lly},{self.urx},{self.ury}'
@@ -92,9 +117,6 @@ class Font:
 class Document:
     def __init__(self, id_, blocks):
         self.id = id_
-        self.blocks = []
-        for block in blocks:
-            self.add_block(block)
         self.pages = []
         for page in make_pages(blocks):
             self.add_page(page)
@@ -110,11 +132,15 @@ class Document:
 
     def remove_lines(self, lines):
         removed = 0
-        for block in self.blocks:
-            removed += block.remove_lines(lines)
+        for page in self.pages:
+            removed += page.remove_lines(lines)
         if removed != len(lines):
             logging.warning(f'only removed {removed}/{len(lines)}')
         return removed
+
+    def revise_blocks(self):
+        for page in self.pages:
+            page.revise_blocks()
 
     def most_common_font_name(self, charset=None):
         """Return the most common font name."""
@@ -205,7 +231,7 @@ class Document:
         return total
 
     def to_freki(self):
-        return '\n'.join(block.to_freki() for block in self.blocks)
+        return '\n'.join(page.to_freki() for page in self.pages)
 
     def __str__(self):
         return '\n'.join(str(block) for block in self.blocks)
@@ -221,6 +247,50 @@ class Page:
         assert block.page_index == self.page_index
         self.blocks.append(block)
         block.page = self
+
+    def remove_lines(self, lines):
+        removed = 0
+        for block in self.blocks:
+            removed += block.remove_lines(lines)
+        return removed
+
+    def revise_blocks(self, max_relative_gap=.75):
+        def can_combine(block1, block2):
+            # ignore empty blocks
+            if len(block1.lines) == 0 or len(block2.lines) == 0:
+                return False
+            # only consider blocks with a consistent font size
+            if (block1.min_font_size() != block1.max_font_size() or
+                block2.min_font_size() != block2.max_font_size() or
+                block1.min_font_size() != block2.min_font_size()):
+                return False
+            # only consider blocks with a consistent left margin
+            if (block1.min_llx() != block1.max_llx() or
+                block2.min_llx() != block2.max_llx() or
+                block1.min_llx() != block2.max_llx()):
+                return False
+            font_size = block1.min_font_size()
+            max_distance = font_size * max_relative_gap
+            return (
+                block1.bbox.is_above(block2.bbox) and
+                block1.bbox.vertical_distance(block2.bbox) <= max_distance
+            )
+
+        while True:
+            revised = False
+            for i in range(len(self.blocks)-1):
+                prev, block = self.blocks[i], self.blocks[i+1]
+                if can_combine(prev, block):
+                    for line in block.lines:
+                        prev.add_line(line)
+                    self.blocks.remove(block)
+                    revised = True
+                    break
+            if not revised:
+                break
+
+    def to_freki(self):
+        return '\n'.join(block.to_freki() for block in self.blocks)
 
     def __str__(self):
         return '\n'.join(str(block) for block in self.blocks)
@@ -240,36 +310,54 @@ class Block:
         self.document = document
         self.lines = []
 
+    def max_font_size(self, roundto=0.1):
+        value = max(font.size for line in self.lines for font in line.fonts)
+        return round(value/roundto) * roundto
+
+    def min_font_size(self, roundto=0.1):
+        value = min(font.size for line in self.lines for font in line.fonts)
+        return round(value/roundto) * roundto
+
+    def min_llx(self, roundto=1.0):
+        value = min(line.bbox.llx for line in self.lines)
+        return round(value/roundto) * roundto
+
+    def max_llx(self, roundto=1.0):
+        value = max(line.bbox.llx for line in self.lines)
+        return round(value/roundto) * roundto
+
     def has_font(self, font_name, font_size):
         """Return True iff any Line in the Block has any text in the given
         font."""
         return any(line.has_font(font_name, font_size) for line in self.lines)
 
-    def width_matches(self, value, value_range):
+    def width_matches(self, value, tolerance):
         """Return True iff the width of the Block BBox is within the given
         range of the given value."""
-        return value-value_range <= self.bbox.width() <= value+value_range
+        # TODO this function should be on BBox
+        return value-tolerance <= self.bbox.width() <= value+tolerance
 
-    def bbox_matches(self, bbox, value_range):
+    def bbox_matches(self, bbox, tolerance):
+        # TODO this function should be on BBox
         if all(v is None for v in (bbox.llx, bbox.lly, bbox.urx, bbox.ury)):
             logger.warning(f'bbox_matches with {bbox}')
         return all((
             (bbox.llx is None or
-             (bbox.llx-value_range <= self.bbox.llx <= bbox.llx+value_range)),
+             (bbox.llx-tolerance <= self.bbox.llx <= bbox.llx+tolerance)),
             (bbox.lly is None or
-             (bbox.lly-value_range <= self.bbox.lly <= bbox.lly+value_range)),
+             (bbox.lly-tolerance <= self.bbox.lly <= bbox.lly+tolerance)),
             (bbox.urx is None or
-             (bbox.urx-value_range <= self.bbox.urx <= bbox.urx+value_range)),
+             (bbox.urx-tolerance <= self.bbox.urx <= bbox.urx+tolerance)),
             (bbox.ury is None or
-             (bbox.ury-value_range <= self.bbox.ury <= bbox.ury+value_range)),
+             (bbox.ury-tolerance <= self.bbox.ury <= bbox.ury+tolerance)),
         ))
 
     def add_line(self, line):
+        self.bbox.expand_to_contain(line.bbox)
         self.lines.append(line)
         line.block = self
 
     def remove_lines(self, lines):
-        # TODO rework bounding box if necessary
         removed = 0
         for l in lines:
             try:
@@ -277,6 +365,14 @@ class Block:
                 removed += 1
             except ValueError:
                 pass    # not in this block
+        if not self.lines:
+            return removed    # TODO eliminate emptied block
+        if removed:
+            # rework bounding box
+            self.bbox.llx = min(line.bbox.llx for line in self.lines)
+            self.bbox.lly = min(line.bbox.lly for line in self.lines)
+            self.bbox.urx = max(line.bbox.urx for line in self.lines)
+            self.bbox.ury = max(line.bbox.ury for line in self.lines)
         return removed
 
     def char_count_by_font(self, charset=None):
@@ -432,7 +528,11 @@ def main(argv):
         logger.setLevel(logging.INFO)
 
     for fn in args.freki:
-        document = load_freki_document(fn, args)
+        try:
+            document = load_freki_document(fn, args)
+        except ValueError as e:
+            logger.error(f'failed to load {fn}: {e}')
+            continue
         print(document.to_freki())
 
 
