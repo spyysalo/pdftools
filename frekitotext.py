@@ -39,10 +39,11 @@ def main(argv):
             document = load_freki_document(fn, args)
         except ValueError:
             continue
-        for block in document.blocks:
-            for line in block.lines:
-                print(line.text)
-            print()
+        for page in document.pages:
+            for block in page.blocks:
+                for line in block.lines:
+                    print(line.text)
+                print()
 
 
 if __name__ == '__main__':
