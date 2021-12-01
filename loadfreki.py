@@ -4,16 +4,16 @@ import sys
 import re
 import logging
 
-from logger import logger
+from copy import copy
 from collections import Counter
 from argparse import ArgumentParser
 
-from common import pairwise
+from logger import logger
 
 
 # Regular expressions for parsing Freki format
 # (see https://github.com/xigt/freki/blob/master/doc/Format.md).
-BLOCK_PREAMBLE_RE = re.compile(r'^doc_id=(\S+) page=(\d+) block_id=(\d+-\d+) bbox=(\S+) label=(\S*) (\d+) (\d+)$')
+BLOCK_PREAMBLE_RE = re.compile(r'^doc_id=(\S+) page=(\d+) block_id=(\S+) bbox=(\S+) label=(\S*) (\d+) (\d+)$')
 
 BLOCK_LINE_RE = re.compile(r'line=(\d+) fonts=(.+?) bbox=(\S+?)(?: iscore=(\d+\.\d+))?(\s*):(.*)$')
 
@@ -35,7 +35,7 @@ def argparser():
     ap.add_argument(
         'freki',
         nargs='+',
-        help='text file(s) extracted from PDF'
+        help='freki file(s) extracted from PDF'
     )
     return ap
 
@@ -54,7 +54,7 @@ class BBox:
         return self.ury - self.lly
 
     def is_above(self, other):
-        return self.lly > other.ury
+        return self.lly >= other.ury
 
     def contains(self, other):
         return (self.llx <= other.llx and
@@ -121,14 +121,15 @@ class Document:
         for page in make_pages(blocks):
             self.add_page(page)
 
+    @property
+    def blocks(self):
+        for page in self.pages:
+            for block in page.blocks:
+                yield block
+
     def add_page(self, page):
         self.pages.append(page)
         page.document = self
-
-    def add_block(self, block):
-        assert block.doc_id == self.id
-        self.blocks.append(block)
-        block.document = self
 
     def remove_lines(self, lines):
         removed = 0
@@ -137,10 +138,6 @@ class Document:
         if removed != len(lines):
             logging.warning(f'only removed {removed}/{len(lines)}')
         return removed
-
-    def revise_blocks(self):
-        for page in self.pages:
-            page.revise_blocks()
 
     def most_common_font_name(self, charset=None):
         """Return the most common font name."""
@@ -254,41 +251,6 @@ class Page:
             removed += block.remove_lines(lines)
         return removed
 
-    def revise_blocks(self, max_relative_gap=.75):
-        def can_combine(block1, block2):
-            # ignore empty blocks
-            if len(block1.lines) == 0 or len(block2.lines) == 0:
-                return False
-            # only consider blocks with a consistent font size
-            if (block1.min_font_size() != block1.max_font_size() or
-                block2.min_font_size() != block2.max_font_size() or
-                block1.min_font_size() != block2.min_font_size()):
-                return False
-            # only consider blocks with a consistent left margin
-            if (block1.min_llx() != block1.max_llx() or
-                block2.min_llx() != block2.max_llx() or
-                block1.min_llx() != block2.max_llx()):
-                return False
-            font_size = block1.min_font_size()
-            max_distance = font_size * max_relative_gap
-            return (
-                block1.bbox.is_above(block2.bbox) and
-                block1.bbox.vertical_distance(block2.bbox) <= max_distance
-            )
-
-        while True:
-            revised = False
-            for i in range(len(self.blocks)-1):
-                prev, block = self.blocks[i], self.blocks[i+1]
-                if can_combine(prev, block):
-                    for line in block.lines:
-                        prev.add_line(line)
-                    self.blocks.remove(block)
-                    revised = True
-                    break
-            if not revised:
-                break
-
     def to_freki(self):
         return '\n'.join(block.to_freki() for block in self.blocks)
 
@@ -302,7 +264,7 @@ class Block:
         self.doc_id = doc_id
         self.page_index = page_index
         self.id = block_id
-        self.bbox = bbox
+        self.bbox = copy(bbox)
         self.label = label
         self.start_line = start_line
         self.end_line = end_line
@@ -356,6 +318,10 @@ class Block:
         self.bbox.expand_to_contain(line.bbox)
         self.lines.append(line)
         line.block = self
+
+    def add_lines(self, lines):
+        for line in lines:
+            self.add_line(line)
 
     def remove_lines(self, lines):
         removed = 0
@@ -419,6 +385,14 @@ class Line:
         self.text = text
         self.block = block
 
+    def max_font_size(self, roundto=0.1):
+        value = max(font.size for font in self.fonts)
+        return round(value/roundto) * roundto
+
+    def min_font_size(self, roundto=0.1):
+        value = min(font.size for font in self.fonts)
+        return round(value/roundto) * roundto
+
     def char_count_by_font(self, charset=None):
         if charset is None:
             # nonspace by default
@@ -444,7 +418,7 @@ class Line:
         if len(self.block.lines) == 1:
             iscore = ''    # no iscores for singletons
         elif self.iscore is not None:
-            iscore = f' iscore={self.iscore}{self.blanks}'
+            iscore = f' iscore={self.iscore:.2f}{self.blanks}'
         else:
             iscore = f'{self.blanks}'
         return (
@@ -462,8 +436,9 @@ class Line:
             raise ValueError(f'failed to parse as Freki block line: {line}')
         line_num, font_string, bbox, iscore, blanks, text = m.groups()
         bbox = parse_bbox(bbox)
+        iscore = float(iscore) if iscore else None
         fonts = []
-        # TODO check that RE matches everything except commas
+        # TODO check that FONT_RE matches everything except commas
         for tag, name, size in FONT_RE.findall(font_string):
             # for tags, see https://tex.stackexchange.com/a/156438
             fonts.append(Font(tag, name, float(size)))
@@ -504,7 +479,7 @@ def load_freki_document(fn, args):
                     current_block = Block.from_freki(line)
                     blocks.append(current_block)
                 except EmptyBBox:
-                    logger.warning(f'empty bbox in {fn}')
+                    logger.info(f'empty bbox in {fn}')
             elif BLOCK_LINE_RE.match(line):
                 current_block.add_line(Line.from_freki(line))
             elif not line:
