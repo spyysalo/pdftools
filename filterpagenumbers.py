@@ -162,7 +162,7 @@ def main(argv):
             logger.error(f'failed to load {fn}: {e}')
             continue
         lines = find_page_number_lines(document, args)
-        logger.debug(f'removing {len(lines)}/{len(document.pages)} from {fn}')
+        logger.debug(f'removing {len(lines)} lines from {fn}')
         document.remove_lines(lines)
         print(document.to_freki())
 
