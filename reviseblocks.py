@@ -6,11 +6,16 @@ import sys
 import re
 import logging
 
+from collections import Counter
 from argparse import ArgumentParser
 
-from common import pairwise
-from logger import logger
+from common import is_prose_line
 from loadfreki import BBox, Block, load_freki_document
+from logger import logger
+
+
+DEFAULT_JOIN_GAP = 0.8
+DEFAULT_SPLIT_GAP = 1.0
 
 
 def argparser():
@@ -18,13 +23,13 @@ def argparser():
     ap.add_argument(
         '--max-join-relative-gap',
         type=float,
-        default=0.8,
+        default=None,
         help='maximum gap relative to font size to join lines'
     )
     ap.add_argument(
         '--min-split-relative-gap',
         type=float,
-        default=1.0,
+        default=DEFAULT_SPLIT_GAP,
         help='maximum gap relative to font size to split lines'
     )
     ap.add_argument(
@@ -52,6 +57,7 @@ def can_split(line1, line2, args):
 
 
 def split_page_blocks(page, args):
+    split_count = 0
     while True:
         revised = False
         for block_idx, block in enumerate(page.blocks):
@@ -78,24 +84,47 @@ def split_page_blocks(page, args):
                     page.blocks.insert(block_idx+1, new_block)
                     revised = True
                     break
-        if not revised:
+        if revised:
+            split_count += 1
+        else:
             break
+    return split_count
 
 
-def can_join(block1, block2, args):
-    # ignore empty blocks
+def compatible_blocks(block1, block2):
+    # require non-empty
     if len(block1.lines) == 0 or len(block2.lines) == 0:
         return False
-    # only consider blocks with a consistent font size
+    # require consistent font size
     if (block1.min_font_size() != block1.max_font_size() or
         block2.min_font_size() != block2.max_font_size() or
         block1.min_font_size() != block2.min_font_size()):
         return False
-    # only consider blocks with a consistent left margin
+    # require consistent left margin
     # TODO: add non-zero tolerance
     if (block1.min_llx() != block1.max_llx() or
         block2.min_llx() != block2.max_llx() or
         block1.min_llx() != block2.max_llx()):
+        return False
+    return True
+
+
+def compatible_lines(line1, line2):
+    if line1 is None or line2 is None:
+        return False
+    # require consistent font size
+    if (line1.min_font_size() != line1.max_font_size() or
+        line2.min_font_size() != line2.max_font_size() or
+        line1.min_font_size() != line2.min_font_size()):
+        return False
+    # require consistent left margin
+    if line1.bbox.llx != line2.bbox.llx:
+        return False
+    return True
+
+
+def can_join(block1, block2, args):
+    if not compatible_blocks(block1, block2):
         return False
     font_size = block1.min_font_size()
     max_distance = font_size * args.max_join_relative_gap
@@ -107,6 +136,7 @@ def can_join(block1, block2, args):
 
 def join_page_blocks(page, args):
     # join blocks heuristically estimated to be compatible
+    join_count = 0
     while True:
         revised = False
         for i in range(len(page.blocks)-1):
@@ -117,15 +147,64 @@ def join_page_blocks(page, args):
                 page.blocks.remove(block)
                 revised = True
                 break
-        if not revised:
+        if revised:
+            join_count += 1
+        else:
             break
+    return join_count
+
+
+def is_prose_block(block):
+    prose_line_count = sum(is_prose_line(line.text) for line in block.lines)
+    return prose_line_count >= len(block.lines)/2    # TODO parameterize
+
+
+def most_common_prose_line_gap(document, args, roundto=0.1):
+    # determine the most common gap size (relative to font size) between
+    # two consecutive prose lines.
+    gap_count = Counter()
+    for page in document.pages:
+        prev_line = None
+        for block in page.blocks:
+            for line in block.lines:
+                if (compatible_lines(prev_line, line) and
+                    prev_line.bbox.is_above(line.bbox)):
+                    distance = prev_line.bbox.vertical_distance(line.bbox)
+                    font_size = line.max_font_size()
+                    relative_gap = distance/font_size
+                    relative_gap = round(relative_gap/roundto)*roundto
+                    gap_count[relative_gap] += 1
+                prev_line = line
+
+    total_count = sum(gap_count.values())
+    if total_count < 10:    # not enough data
+        return DEFAULT_JOIN_GAP
+    most_common = gap_count.most_common(1)[0][0]
+    if most_common < DEFAULT_JOIN_GAP:
+        logger.warning(f'using {DEFAULT_JOIN_GAP:.2f} instead of smaller '
+                       f'estimated gap {most_common:.2f}')
+        return DEFAULT_JOIN_GAP
+    else:
+        return most_common
 
 
 def revise_document_blocks(document, args):
+    stored_gap = args.max_join_relative_gap
+    if args.max_join_relative_gap is None:
+        # determine heuristically
+        roundto = 0.1
+        gap = most_common_prose_line_gap(document, args) + roundto/2
+        gap = min(gap, args.min_split_relative_gap-roundto/2)
+        args.max_join_relative_gap = gap
+
     # only perform block rearrangement within pages
+    split_count, join_count = 0, 0
     for page in document.pages:
-        split_page_blocks(page, args)
-        join_page_blocks(page, args)
+        split_count += split_page_blocks(page, args)
+        join_count += join_page_blocks(page, args)
+
+    args.max_join_relative_gap = stored_gap
+    return split_count, join_count
 
 
 def main(argv):
@@ -141,7 +220,8 @@ def main(argv):
             document = load_freki_document(fn, args)
         except ValueError:
             continue
-        revise_document_blocks(document, args)
+        split_count, join_count = revise_document_blocks(document, args)
+        logger.info(f'split {split_count}, joined {join_count} in {fn}')
         print(document.to_freki())
 
 
