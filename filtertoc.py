@@ -8,7 +8,7 @@ import logging
 from collections import defaultdict
 from argparse import ArgumentParser
 
-from common import longest_increasing_subsequence
+from common import is_prose_line, longest_increasing_subsequence
 from loadfreki import load_freki_document
 
 
@@ -17,14 +17,18 @@ logger = logging.getLogger(os.path.basename(__file__))
 
 
 # Regular expression for potential TOC lines: lines ending with digits
-# a have a minimum number of consequtive alphabetic characters.
-TOC_LINE_RE = re.compile(r'^[\W0-9]*[^\W0-9]{3}.*?(\d+)\s*$')
+# that have a minimum number of consequtive alphabetic characters.
+TOC_LINE_RE = re.compile(r'^([\W0-9]*[^\W0-9]{3}.*?\b)(?:\d+-)?(\d+)\s*$')
+
+# Regular expression for rejecting coincidental TOC line matches
+REJECT_TOC_LINE_START_RE = re.compile(r'.*\w[.,:;-]$')
 
 # Words indicating first section in TOC (TODO: add more; other languages)
 FIRST_SECTION_WORDS = {
     'introduction', 'johdanto', 'inledning',
     'abstract', 'tiivistelmä',
     'foreword', 'alkusanat',
+    'preface', 'esipuhe', 'johdanto',
 }
 
 
@@ -33,7 +37,7 @@ def argparser():
     ap.add_argument(
         '--relative-toc-location',
         type=float,
-        default=0.5,
+        default=1/3,
         help='how far into the document to look into for TOC'
     )
     ap.add_argument(
@@ -73,7 +77,12 @@ def parse_toc_line(string):
     m = TOC_LINE_RE.match(string)
     if not m:
         raise ValueError(f'failed to parse TOC line: {string}')
-    number = int(m.group(1))
+    start, number = m.groups()
+    m = REJECT_TOC_LINE_START_RE.match(start)
+    if m:
+        logger.debug(f'reject "{start}{number}"')
+        raise ValueError(f'failed to parse TOC line: {string}')
+    number = int(number)
     return number
 
 
@@ -134,6 +143,8 @@ def includes_toc_start(candidates):
     # attempts to determine if the candidates include the TOC start
     if not candidates:
         return False
+    elif candidates[0].number == 1:
+        return True    # assume page 1 is first in TOC
 
     first_line_text = candidates[0].line.text.strip().lower()
     if first_line_text.startswith('1'):
@@ -143,7 +154,7 @@ def includes_toc_start(candidates):
     elif any(w in first_line_text for w in FIRST_SECTION_WORDS):
         return True
 
-    logger.warning(f'unsure if TOC start: {first_line_text}')
+    logger.debug(f'unsure if TOC start: {first_line_text}')
     return False
 
 
@@ -214,12 +225,19 @@ def find_toc_lines(document, args):
 
     # check how many of the lines in the span are TOC lines
     line_ratio = len(toc_lines)/len(toc_range_lines)
-    if line_ratio < 0.5:
+    if line_ratio < 0.2:
+        logger.info(f'rejecting low TOC line/TOC span ratio {line_ratio:.1%}')
+        return []
+    elif line_ratio < 0.5:
         logger.warning(f'low TOC line/TOC span ratio {line_ratio:.1%} '
                        f'({len(toc_lines)}/{len(toc_range_lines)}) '
                        f'in {document.id}')
 
     return toc_range_lines
+
+
+def prose_lines(lines):
+    return [line for line in lines if is_prose_line(line.text)]
 
 
 def main(argv):
@@ -237,8 +255,14 @@ def main(argv):
             logger.error(f'failed to load {fn}: {e}')
             continue
         lines = find_toc_lines(document, args)
-        logger.debug(f'removing {len(lines)} lines from {fn}')
-        document.remove_lines(lines)
+
+        # sanity check: if the heuristic returns more than a threshold
+        # proprortion of (apparent) prose lines, reject the candidate
+        if lines and len(prose_lines(lines))/len(lines) > 0.8:
+            logger.warning('rejecting prose block in {fn}')
+        else:
+            logger.debug(f'removing {len(lines)} lines from {fn}')
+            document.remove_lines(lines)
         print(document.to_freki())
 
 
