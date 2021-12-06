@@ -8,6 +8,7 @@ import os
 import logging
 
 from typing import Iterable
+from multiprocessing import Process, Queue
 from argparse import ArgumentParser
 
 from pdfminer.layout import LAParams, LTImage
@@ -21,10 +22,22 @@ logger = logging.getLogger(os.path.basename(__file__))
 def argparser():
     ap = ArgumentParser()
     ap.add_argument(
+        '--timeout',
+        type=int,
+        default=60,
+        help='timeout per file in seconds'
+    )
+    ap.add_argument(
         '--min-coverage',
         type=float,
         default=0.9,
         help='minimum average image to page ratio'
+    )
+    ap.add_argument(
+        '--debug',
+        default=False,
+        action='store_true',
+        help='debug output'
     )
     ap.add_argument(
         '--verbose',
@@ -67,35 +80,69 @@ def intersection(bbox1, bbox2):
 def pdf_is_scanned(fn, args):
     laparams = LAParams()
     page_coverage = []
-    for page in extract_pages(fn, laparams=laparams):
+    for i, page in enumerate(extract_pages(fn, laparams=laparams)):
         overlaps = [0]
         for image in find_images(page, args):
             isect = intersection(page.bbox, image.bbox)
             overlaps.append(area(isect)/area(page.bbox))
         # TODO consider intersecting images instead of simple max
+        logger.debug(f'page {i}: {max(overlaps):.1%}')
         page_coverage.append(max(overlaps))
     avg_coverage = sum(page_coverage)/len(page_coverage)
     logger.info(
         f'{fn}: average coverage {avg_coverage:.1%}, '
         'values {}'.format(','.join(f'{c:.1%}' for c in page_coverage))
     )
-    return avg_coverage >= args.min_coverage
+    is_scanned = avg_coverage >= args.min_coverage
+    return is_scanned
+
+
+def mp_run(func, queue, args):
+    retval = func(*args)
+    queue.put(retval)
+
+
+def run_with_timeout(func, args, timeout):
+    queue = Queue()
+    process = Process(target=mp_run, args=(func, queue, args))
+    process.start()
+    process.join(timeout)
+    if process.exitcode is not None:
+        # completed
+        return queue.get()
+    else:
+        # timeout
+        process.terminate()
+        return None
 
 
 def main(argv):
     args = argparser().parse_args(argv[1:])
 
-    if args.verbose:
+    if args.debug:
+        logger.setLevel(logging.DEBUG)
+    elif args.verbose:
         logger.setLevel(logging.INFO)
 
     found_scanned = False
     for fn in args.pdf:
+        logger.debug(f'start {fn}')
         try:
-            is_scanned = pdf_is_scanned(fn, args)
-            found_scanned |= is_scanned
-            print(f'{is_scanned} {fn}')
+            # run with timeout to avoid hangs
+            is_scanned = run_with_timeout(
+                pdf_is_scanned,
+                (fn, args),
+                args.timeout
+            )
+            if is_scanned is None:
+                logger.error(f'timeout for {fn}')
+                print(f'timeout {fn}')
+            else:
+                found_scanned |= is_scanned
+                print(f'{is_scanned} {fn}')
         except Exception as e:
             logger.error(f'failed to parse {fn}: {e}')
+        logger.debug(f'end {fn}')
 
     # invert for shell
     return 0 if found_scanned else 1
