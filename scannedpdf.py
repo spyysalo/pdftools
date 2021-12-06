@@ -98,8 +98,12 @@ def pdf_is_scanned(fn, args):
 
 
 def mp_run(func, queue, args):
-    retval = func(*args)
-    queue.put(retval)
+    try:
+        retval = func(*args)
+        queue.put(retval)
+    except Exception as e:
+        logger.error(f'{func.__name__} failed with exception: {e}')
+        queue.put(type(e).__name__)
 
 
 def run_with_timeout(func, args, timeout):
@@ -137,6 +141,8 @@ def main(argv):
             if is_scanned is None:
                 logger.error(f'timeout for {fn}')
                 print(f'timeout {fn}')
+            elif not isinstance(is_scanned, bool):
+                print(f'ERROR:{is_scanned} {fn}')                
             else:
                 found_scanned |= is_scanned
                 print(f'{is_scanned} {fn}')
