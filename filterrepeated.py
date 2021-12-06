@@ -56,7 +56,6 @@ def block_group_key(block, roundto=10):
 
 def find_repeated_elements(document, args):
     group_blocks = defaultdict(list)
-    print(len(document.pages), 'pages')
     for page in document.pages:
         if not page.blocks:
             continue
