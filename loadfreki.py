@@ -76,6 +76,16 @@ class BBox:
         else:
             raise ValueError(f'neither above: {self} vs {other}')
 
+    def distance_from_bottom(self, other):
+        if self.lly < other.lly:
+            raise ValueError
+        return self.lly - other.lly
+
+    def distance_from_top(self, other):
+        if self.ury > other.ury:
+            raise ValueError
+        return other.ury - self.ury
+
     def to_freki(self):
         return f'{self.llx},{self.lly},{self.urx},{self.ury}'
 
@@ -240,6 +250,15 @@ class Page:
         self.document = document
         self.blocks = []
 
+    @property
+    def bbox(self):
+        if not self.blocks:
+            raise ValueError(f'bbox for Page with no Blocks')
+        bbox = copy(self.blocks[0].bbox)
+        for block in self.blocks:
+            bbox.expand_to_contain(block.bbox)
+        return bbox
+
     def add_block(self, block):
         assert block.page_index == self.page_index
         self.blocks.append(block)
@@ -271,6 +290,9 @@ class Block:
         self.page = page
         self.document = document
         self.lines = []
+
+    def get_text(self):
+        return '\n'.join(line.text for line in self.lines)
 
     def max_font_size(self, roundto=0.1):
         value = max(font.size for line in self.lines for font in line.fonts)
