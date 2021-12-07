@@ -501,7 +501,7 @@ def load_freki_document(fn, args):
                     current_block = Block.from_freki(line)
                     blocks.append(current_block)
                 except EmptyBBox:
-                    logger.info(f'empty bbox in {fn}')
+                    logger.debug(f'empty bbox in {fn}')
             elif BLOCK_LINE_RE.match(line):
                 current_block.add_line(Line.from_freki(line))
             elif not line:
